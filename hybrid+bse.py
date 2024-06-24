@@ -17,13 +17,9 @@ from deps.monodepth2.utils import download_model_if_doesnt_exist
 
 from seathru import *
 
-# Set environment variable to handle OpenMP issues
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
 def correct_color(image):
-    """
-    Perform color correction to reduce blue tint.
-    """
     avgR = np.mean(image[:, :, 0])
     avgG = np.mean(image[:, :, 1])
     avgB = np.mean(image[:, :, 2])
@@ -37,12 +33,6 @@ def correct_color(image):
     return image
 
 def enhance_brightness(image, factor=1.5):
-    """
-    Enhance the brightness of the image.
-    :param image: Input image in numpy array format.
-    :param factor: Factor to control brightness. >1 increases brightness, <1 decreases.
-    :return: Brightness enhanced image.
-    """
     pil_img = Image.fromarray((image * 255).astype(np.uint8))
     enhancer = ImageEnhance.Brightness(pil_img)
     enhanced_img = enhancer.enhance(factor)
@@ -56,7 +46,6 @@ def read_image(image_path):
         image_file = Image.open(image_path)
     return np.float64(image_file) / 255.0
 
-# Add Backscatter Estimation Functions
 
 def predict_backscatter(z, veil, backscatter, recover, attenuation):
     return (veil * (1 - np.exp(-backscatter * z)) + recover * np.exp(-attenuation * z))
@@ -122,12 +111,10 @@ def run(args):
     encoder_path = os.path.join(model_path, "encoder.pth")
     depth_decoder_path = os.path.join(model_path, "depth.pth")
 
-    # LOADING PRETRAINED MODEL
     print("   Loading pretrained encoder")
     encoder = networks.ResnetEncoder(18, False)
     loaded_dict_enc = torch.load(encoder_path, map_location=device)
 
-    # extract the height and width of image that this model was trained with
     feed_height = loaded_dict_enc['height']
     feed_width = loaded_dict_enc['width']
     filtered_dict_enc = {k: v for k, v in loaded_dict_enc.items() if k in encoder.state_dict()}
@@ -144,14 +131,12 @@ def run(args):
     depth_decoder.to(device)
     depth_decoder.eval()
 
-    # Load the image
     img = Image.fromarray(rawpy.imread(args.image).postprocess()) if args.raw else Image.open(args.image).convert('RGB')
     original_width, original_height = img.size
     input_image = img.resize((feed_width, feed_height), Image.LANCZOS)
     input_image = transforms.ToTensor()(input_image).unsqueeze(0)
     print('Preprocessed image', flush=True)
 
-    # PREDICTION using Monodepth2
     input_image = input_image.to(device)
     features = encoder(input_image)
     outputs = depth_decoder(features)
@@ -160,45 +145,36 @@ def run(args):
     disp_resized = torch.nn.functional.interpolate(
         disp, (original_height, original_width), mode="bilinear", align_corners=False)
 
-    # Save the depth map from Monodepth2
     disp_resized_np = disp_resized.squeeze().cpu().detach().numpy()
     plt.imsave('monodepth2_depth_map.png', disp_resized_np, cmap='plasma')
 
-    # Load provided depth map
     provided_depth_map = Image.open(args.depth_map)
     provided_depth_map = provided_depth_map.resize((original_width, original_height), Image.LANCZOS)
     provided_depth_map_np = np.array(provided_depth_map).astype(np.float32)
     provided_depth_map_np = (provided_depth_map_np - np.min(provided_depth_map_np)) / (np.max(provided_depth_map_np) - np.min(provided_depth_map_np))
 
-    # Merge the depth maps
     combined_depth_map = (provided_depth_map_np + disp_resized_np) / 2.0
     plt.imsave('combined_depth_map.png', combined_depth_map, cmap='plasma')
 
-    # Adjust depth map preprocessing
     mapped_im_depths = ((combined_depth_map - np.min(combined_depth_map)) / (np.max(combined_depth_map) - np.min(combined_depth_map))).astype(np.float32)
     print("Processed image", flush=True)
     print('Loading image...', flush=True)
     depths = preprocess_monodepth_depth_map(mapped_im_depths, args.monodepth_add_depth, args.monodepth_multiply_depth)
     original = np.array(img) / 255.0
 
-    # Estimating backscatter
     print("Estimating backscatter...")
     Ba, coeffs = estimate_backscatter(original, depths)
 
     Da = original - Ba
     Da = np.clip(Da, 0, 1)
 
-    # Further processing to enhance image quality
     sigma_est = estimate_sigma(Da, channel_axis=-1, average_sigmas=True) / 10.0
     Da = denoise_tv_chambolle(Da, weight=sigma_est, channel_axis=-1)
 
-    # Optional additional enhancements
     Da = exposure.equalize_adapthist(Da)
 
-    # Apply color correction to reduce blue tint
     Da = correct_color(Da)
 
-    # Enhance the brightness of the image
     Da = enhance_brightness(Da, factor=args.brightness_factor)
 
     im = Image.fromarray((np.round(Da * 255.0)).astype(np.uint8))

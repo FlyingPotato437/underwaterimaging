@@ -17,9 +17,6 @@ from deps.monodepth2.utils import download_model_if_doesnt_exist
 from seathru import *
 
 def correct_color(image):
-    """
-    Perform color correction to reduce blue tint.
-    """
     avgR = np.mean(image[:, :, 0])
     avgG = np.mean(image[:, :, 1])
     avgB = np.mean(image[:, :, 2])
@@ -41,8 +38,7 @@ def read_image(image_path):
     return np.float64(image_file) / 255.0
 
 def run(args):
-    """Function to process image with provided depth map and merge with Monodepth2 prediction"""
-    assert args.depth_map is not None, "You must specify the --depth_map parameter"
+    assert args.depth_map is not None, "specify thee --depth_map parameter"
 
     if torch.cuda.is_available() and not args.no_cuda:
         device = torch.device("cuda")
@@ -55,12 +51,10 @@ def run(args):
     encoder_path = os.path.join(model_path, "encoder.pth")
     depth_decoder_path = os.path.join(model_path, "depth.pth")
 
-    # LOADING PRETRAINED MODEL
     print("   Loading pretrained encoder")
     encoder = networks.ResnetEncoder(18, False)
     loaded_dict_enc = torch.load(encoder_path, map_location=device)
 
-    # extract the height and width of image that this model was trained with
     feed_height = loaded_dict_enc['height']
     feed_width = loaded_dict_enc['width']
     filtered_dict_enc = {k: v for k, v in loaded_dict_enc.items() if k in encoder.state_dict()}
@@ -84,7 +78,6 @@ def run(args):
     input_image = transforms.ToTensor()(input_image).unsqueeze(0)
     print('Preprocessed image', flush=True)
 
-    # PREDICTION using Monodepth2
     input_image = input_image.to(device)
     features = encoder(input_image)
     outputs = depth_decoder(features)
@@ -93,35 +86,28 @@ def run(args):
     disp_resized = torch.nn.functional.interpolate(
         disp, (original_height, original_width), mode="bilinear", align_corners=False)
 
-    # Save the depth map from Monodepth2
     disp_resized_np = disp_resized.squeeze().cpu().detach().numpy()
     plt.imsave('monodepth2_depth_map.png', disp_resized_np, cmap='plasma')
 
-    # Load provided depth map
     provided_depth_map = Image.open(args.depth_map)
     provided_depth_map = provided_depth_map.resize((original_width, original_height), Image.LANCZOS)
     provided_depth_map_np = np.array(provided_depth_map).astype(np.float32)
     provided_depth_map_np = (provided_depth_map_np - np.min(provided_depth_map_np)) / (np.max(provided_depth_map_np) - np.min(provided_depth_map_np))
 
-    # Merge the depth maps
     combined_depth_map = (provided_depth_map_np + disp_resized_np) / 2.0
     plt.imsave('combined_depth_map.png', combined_depth_map, cmap='plasma')
 
-    # Adjust depth map preprocessing
     mapped_im_depths = ((combined_depth_map - np.min(combined_depth_map)) / (np.max(combined_depth_map) - np.min(combined_depth_map))).astype(np.float32)
     print("Processed image", flush=True)
     print('Loading image...', flush=True)
     depths = preprocess_monodepth_depth_map(mapped_im_depths, args.monodepth_add_depth, args.monodepth_multiply_depth)
     recovered = run_pipeline(np.array(img) / 255.0, depths, args)
 
-    # Further processing to enhance image quality
     sigma_est = estimate_sigma(recovered, channel_axis=-1, average_sigmas=True) / 10.0
     recovered = denoise_tv_chambolle(recovered, weight=sigma_est, channel_axis=-1)
 
-    # Optional additional enhancements
     recovered = exposure.equalize_adapthist(recovered)
 
-    # Apply color correction to reduce blue tint
     recovered = correct_color(recovered)
 
     im = Image.fromarray((np.round(recovered * 255.0)).astype(np.uint8))
